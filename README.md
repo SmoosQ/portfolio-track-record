@@ -65,7 +65,9 @@ Only income rows whose asset is exactly `USDC` are included. Every observation i
 
 The public CSV contains daily returns, normalized equity, drawdown, daily realized PnL, commission, funding, net PnL, and trade count. It never contains the account balance, API metadata, UID, email, wallet address, or transaction hash.
 
-Private detailed outputs are written to `local_reports/`, and the underlying official USDC equity snapshots, account-trade cache, and one-minute mark-price cache are retained in `data/private/`. Both directories are ignored by Git. The local report includes a minute-level total equity curve, minute-level realized/unrealized/combined PnL, and daily/monthly returns including unrealized PnL. Minute unrealized PnL is reconstructed from trades and mark prices and calibrated to official account snapshots.
+Private detailed outputs are written to `local_reports/`, and the underlying official USDC equity snapshots, account-trade cache, and one-minute mark-price cache are retained in `data/private/`. Both directories are ignored by Git. Minute results are compressed into UTC-day partitions under `local_reports/minute/`. The local report includes a minute-level total equity curve, minute-level realized/unrealized/combined PnL, and daily/monthly returns including unrealized PnL. Minute unrealized PnL is reconstructed from trades and mark prices and calibrated to official account snapshots.
+
+Private raw data is stored in compressed UTC-day partitions under `data/private/{income,trades,mark_prices,snapshots}/`; a valid empty partition records a queried day with no events. The private `state.json` records the last successful fetch cursor for each stream and symbol. Each update requests only the missing interval plus a small safety overlap: 10 minutes for mark prices, one day for income and trades, and two days for account snapshots. Overlapping records are merged by their Binance identifiers or timestamps, so they are refreshed rather than duplicated. This preserves local history after it ages out of Binance's API window.
 
 ## Local environment and updates
 

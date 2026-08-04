@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, Iterator
 
 from .binance_client import BinanceClientError, BinanceReadOnlyClient
+from .private_store import (
+    PRIVATE_DIR,
+    ensure_private_directory,
+    load_state,
+    read_json,
+    read_json_gzip,
+    save_state,
+    write_json,
+    write_json_gzip,
+)
 
 TRACKED_ASSET = "USDC"
 PERFORMANCE_INCEPTION_UTC = datetime(2026, 7, 1, tzinfo=UTC)
 FUTURES_RETENTION_DAYS = 89
-ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_SNAPSHOT_PATH = ROOT / "data" / "private" / "usdc_equity_snapshots.json"
+INCOME_DIR = PRIVATE_DIR / "income"
+SNAPSHOT_DIR = PRIVATE_DIR / "snapshots"
 
 
 @dataclass
@@ -45,24 +52,22 @@ def fetch_account_data(
     if inception >= end:
         raise ValueError("Performance inception must be earlier than the report end time.")
 
-    retention_floor = end - timedelta(days=FUTURES_RETENTION_DAYS)
-    fetch_start = max(inception, retention_floor)
-    data = AccountData(
-        inception_utc=inception,
-        fetch_start_utc=fetch_start,
-        end_utc=end,
-    )
-    if fetch_start > inception:
-        data.warnings.append(
-            "Binance API retention no longer covers inception; verified earlier daily rows were preserved from the repository."
-        )
-
     try:
         account = client.futures_account()
-        income = _fetch_futures_income(client, fetch_start, end)
+        income, coverage_start = _update_income_cache(client, inception, end)
         snapshots = _fetch_equity_snapshots(client, inception, end, account)
     except BinanceClientError as exc:
         raise RuntimeError(f"Required USD-M Futures read failed: {exc}") from exc
+
+    data = AccountData(
+        inception_utc=inception,
+        fetch_start_utc=coverage_start,
+        end_utc=end,
+    )
+    if coverage_start > inception:
+        data.warnings.append(
+            "Local income partitions do not cover inception; unavailable earlier days were not fabricated."
+        )
 
     assets = account.get("assets", []) if isinstance(account, dict) else []
     if not isinstance(assets, list) or not any(
@@ -86,7 +91,18 @@ def _fetch_equity_snapshots(
 ) -> list[dict[str, Any]]:
     """Merge Binance daily snapshots with private local history and today's account."""
 
-    query_start = max(inception, end - timedelta(days=29, hours=23))
+    state = load_state()
+    previous_end_ms = state.get("snapshots_last_fetch_end_ms")
+    incremental_start = (
+        datetime.fromtimestamp(int(previous_end_ms) / 1_000, UTC) - timedelta(days=2)
+        if previous_end_ms is not None
+        else inception
+    )
+    query_start = max(
+        inception,
+        incremental_start,
+        end - timedelta(days=29, hours=23),
+    )
     payload = client.futures_account_snapshots(
         startTime=_to_ms(query_start),
         endTime=_to_ms(end),
@@ -105,6 +121,9 @@ def _fetch_equity_snapshots(
     merged[current_row["date"]] = current_row
     result = [merged[key] for key in sorted(merged) if key >= inception.date().isoformat()]
     _write_private_snapshots(result)
+    state["snapshots_last_fetch_end_ms"] = _to_ms(end)
+    state.setdefault("snapshots_coverage_start_date", result[0]["date"] if result else None)
+    save_state(state)
     return result
 
 
@@ -152,23 +171,102 @@ def _equity_row(timestamp: datetime, asset: dict[str, Any], source: str) -> dict
 
 
 def _load_private_snapshots() -> list[dict[str, Any]]:
-    if not PRIVATE_SNAPSHOT_PATH.exists():
-        return []
-    try:
-        payload = json.loads(PRIVATE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BinanceClientError("Private equity snapshot history is unreadable.") from exc
-    if not isinstance(payload, list):
-        raise BinanceClientError("Private equity snapshot history has an invalid shape.")
-    return [row for row in payload if isinstance(row, dict) and isinstance(row.get("date"), str)]
+    ensure_private_directory(SNAPSHOT_DIR)
+    rows = [read_json(path) for path in sorted(SNAPSHOT_DIR.glob("*.json"))]
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get("date"), str)]
 
 
 def _write_private_snapshots(rows: list[dict[str, Any]]) -> None:
-    PRIVATE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = PRIVATE_SNAPSHOT_PATH.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, PRIVATE_SNAPSHOT_PATH)
+    ensure_private_directory(SNAPSHOT_DIR)
+    for row in rows:
+        path = SNAPSHOT_DIR / f"{row['date']}.json"
+        if path.exists() and read_json(path) == row:
+            continue
+        write_json(path, row)
+
+
+def _update_income_cache(
+    client: BinanceReadOnlyClient,
+    inception: datetime,
+    end: datetime,
+) -> tuple[list[dict[str, Any]], datetime]:
+    state = load_state()
+    retention_floor = end - timedelta(days=FUTURES_RETENTION_DAYS)
+    previous_end_ms = state.get("income_last_fetch_end_ms")
+    if previous_end_ms is None:
+        query_start = max(inception, retention_floor)
+        coverage_start = query_start
+    else:
+        query_start = max(
+            inception,
+            retention_floor,
+            datetime.fromtimestamp(int(previous_end_ms) / 1_000, UTC) - timedelta(days=1),
+        )
+        stored_start_ms = state.get("income_coverage_start_ms")
+        coverage_start = (
+            datetime.fromtimestamp(int(stored_start_ms) / 1_000, UTC)
+            if stored_start_ms is not None
+            else query_start
+        )
+
+    fresh = [
+        row
+        for row in _fetch_futures_income(client, query_start, end)
+        if str(row.get("asset", "")).upper() == TRACKED_ASSET
+    ]
+    _merge_income_partitions(fresh)
+    _ensure_income_partition_dates(coverage_start, end)
+    state["income_last_fetch_end_ms"] = _to_ms(end)
+    state["income_coverage_start_ms"] = _to_ms(coverage_start)
+    save_state(state)
+    return _load_income_partitions(), coverage_start
+
+
+def _merge_income_partitions(rows: list[dict[str, Any]]) -> None:
+    ensure_private_directory(INCOME_DIR)
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        date = datetime.fromtimestamp(int(row.get("time", 0)) / 1_000, UTC).date().isoformat()
+        by_date.setdefault(date, []).append(row)
+    for date, new_rows in by_date.items():
+        path = INCOME_DIR / f"{date}.json.gz"
+        existing = read_json_gzip(path) if path.exists() else []
+        unique = {_income_key(row): row for row in [*existing, *new_rows]}
+        merged = sorted(unique.values(), key=lambda row: int(row.get("time", 0) or 0))
+        write_json_gzip(path, merged)
+
+
+def _load_income_partitions() -> list[dict[str, Any]]:
+    ensure_private_directory(INCOME_DIR)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(INCOME_DIR.glob("*.json.gz")):
+        payload = read_json_gzip(path)
+        if not isinstance(payload, list):
+            raise BinanceClientError("Private income partition has an invalid shape.")
+        rows.extend(row for row in payload if isinstance(row, dict))
+    unique = {_income_key(row): row for row in rows}
+    return sorted(unique.values(), key=lambda row: int(row.get("time", 0) or 0))
+
+
+def _ensure_income_partition_dates(start: datetime, end: datetime) -> None:
+    ensure_private_directory(INCOME_DIR)
+    cursor = start.date()
+    while cursor <= end.date():
+        path = INCOME_DIR / f"{cursor.isoformat()}.json.gz"
+        if not path.exists():
+            write_json_gzip(path, [])
+        cursor += timedelta(days=1)
+
+
+def _income_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("incomeType"),
+        row.get("tranId"),
+        row.get("tradeId"),
+        row.get("time"),
+        row.get("asset"),
+        row.get("income"),
+    )
 
 
 def _fetch_futures_income(

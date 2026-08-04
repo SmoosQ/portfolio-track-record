@@ -32,7 +32,6 @@ REQUIRED_OUTPUTS = (
     ROOT / "reports" / "performance_summary.md",
     ROOT / "data" / "processed" / "normalized_daily_equity.csv",
     ROOT / "local_reports" / "detailed_daily_performance.csv",
-    ROOT / "local_reports" / "minute_performance.csv",
     ROOT / "local_reports" / "total_equity_curve.png",
     ROOT / "local_reports" / "pnl_components.png",
     ROOT / "local_reports" / "daily_pnl_components.png",
@@ -40,6 +39,14 @@ REQUIRED_OUTPUTS = (
     ROOT / "local_reports" / "monthly_total_returns.png",
     ROOT / "local_reports" / "detailed_summary.json",
     ROOT / "local_reports" / "detailed_report.md",
+    ROOT / "data" / "private" / "state.json",
+)
+PRIVATE_PARTITIONS = (
+    (ROOT / "data" / "private" / "income", "*.json.gz"),
+    (ROOT / "data" / "private" / "trades", "*.json.gz"),
+    (ROOT / "data" / "private" / "mark_prices", "*.csv.gz"),
+    (ROOT / "data" / "private" / "snapshots", "*.json"),
+    (ROOT / "local_reports" / "minute", "*.csv.gz"),
 )
 
 
@@ -147,6 +154,11 @@ def _prepare_repository() -> None:
 
 def _verify_outputs() -> None:
     missing = [str(path.relative_to(ROOT)) for path in REQUIRED_OUTPUTS if not path.is_file() or path.stat().st_size == 0]
+    missing.extend(
+        str(directory.relative_to(ROOT))
+        for directory, pattern in PRIVATE_PARTITIONS
+        if not any(directory.glob(pattern))
+    )
     if missing:
         raise RuntimeError("Required generated files are missing or empty: " + ", ".join(missing))
 

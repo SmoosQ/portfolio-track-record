@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORTS_DIR = ROOT / "reports"
 PROCESSED_DIR = ROOT / "data" / "processed"
 LOCAL_REPORTS_DIR = ROOT / "local_reports"
+LOCAL_MINUTE_DIR = LOCAL_REPORTS_DIR / "minute"
 BLUE = "#2563EB"
 BLUE_DARK = "#1E3A8A"
 GOLD = "#D4A72C"
@@ -42,6 +43,8 @@ def main() -> int:
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     LOCAL_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(LOCAL_REPORTS_DIR, 0o700)
+    LOCAL_MINUTE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(LOCAL_MINUTE_DIR, 0o700)
 
     historical_daily = _load_historical_daily()
     historical_private_daily = _load_private_daily()
@@ -177,8 +180,13 @@ def _write_private_reports(
     _atomic_private_csv(LOCAL_REPORTS_DIR / "detailed_daily_performance.csv", public)
 
     minute = minute_result.daily.copy().reset_index()
+    minute["date"] = minute["timestamp_utc"].dt.strftime("%Y-%m-%d")
     minute["timestamp_utc"] = minute["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    _atomic_private_csv(LOCAL_REPORTS_DIR / "minute_performance.csv", minute)
+    for date, partition in minute.groupby("date"):
+        _atomic_private_csv_gzip(
+            LOCAL_MINUTE_DIR / f"{date}.csv.gz",
+            partition.drop(columns="date"),
+        )
 
     minute_daily = minute_result.daily
     minute_dates = minute_daily.index.tz_localize(None)
@@ -411,6 +419,18 @@ def _atomic_private_csv(path: Path, frame: pd.DataFrame) -> None:
     os.replace(temporary, path)
 
 
+def _atomic_private_csv_gzip(path: Path, frame: pd.DataFrame) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    frame.to_csv(
+        temporary,
+        index=False,
+        float_format="%.10f",
+        compression={"method": "gzip", "compresslevel": 6, "mtime": 0},
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -446,7 +466,7 @@ Minute observations: **{summary['minute_observations']:,}**
 - `daily_pnl_components.png`: daily realized, unrealized change, and total PnL
 - `daily_total_returns.png`: daily total returns
 - `monthly_total_returns.png`: monthly total returns
-- `minute_performance.csv`: private minute-level data
+- `minute/`: compressed private minute-level data partitioned by UTC date
 - `detailed_daily_performance.csv`: private daily data
 
 ## Method

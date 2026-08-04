@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -15,9 +14,15 @@ import pandas as pd
 
 from .binance_client import BinanceReadOnlyClient
 from .fetch_account_data import AccountData
+from .private_store import (
+    PRIVATE_DIR,
+    ensure_private_directory,
+    load_state,
+    read_json_gzip,
+    save_state,
+    write_json_gzip,
+)
 
-ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_DIR = ROOT / "data" / "private"
 TRADES_DIR = PRIVATE_DIR / "trades"
 MARKS_DIR = PRIVATE_DIR / "mark_prices"
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9_]{2,30}$")
@@ -127,8 +132,7 @@ def build_minute_performance(
 
 def _prepare_private_directories() -> None:
     for path in (PRIVATE_DIR, TRADES_DIR, MARKS_DIR):
-        path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, 0o700)
+        ensure_private_directory(path)
 
 
 def _update_trade_cache(
@@ -136,14 +140,20 @@ def _update_trade_cache(
     symbol: str,
     end: datetime,
 ) -> list[dict[str, Any]]:
-    path = TRADES_DIR / f"{symbol}.json"
-    cached = _read_json_list(path)
+    state = load_state()
+    cursors = state.setdefault("trades_last_fetch_end_ms", {})
+    coverage = state.setdefault("trades_coverage_start_ms", {})
+    previous_end_ms = cursors.get(symbol)
     six_month_floor = end - timedelta(days=179)
-    if cached:
-        latest = datetime.fromtimestamp(max(int(row["time"]) for row in cached) / 1_000, UTC)
-        start = max(six_month_floor, latest - timedelta(days=1))
-    else:
-        start = six_month_floor
+    coverage.setdefault(symbol, int(six_month_floor.timestamp() * 1_000))
+    start = (
+        max(
+            six_month_floor,
+            datetime.fromtimestamp(int(previous_end_ms) / 1_000, UTC) - timedelta(days=1),
+        )
+        if previous_end_ms is not None
+        else six_month_floor
+    )
 
     fetched: list[dict[str, Any]] = []
     cursor = start
@@ -167,14 +177,14 @@ def _update_trade_cache(
             )
         cursor = window_end + timedelta(milliseconds=1)
 
-    unique = {
-        (str(row.get("symbol")), int(row.get("id", 0))): row
-        for row in cached + fetched
-        if row.get("id") is not None and row.get("time") is not None
-    }
-    rows = sorted(unique.values(), key=lambda row: (int(row["time"]), int(row["id"])))
-    _write_private_json(path, rows)
-    return rows
+    _merge_trade_partitions(fetched)
+    _ensure_trade_partition_dates(
+        datetime.fromtimestamp(int(coverage[symbol]) / 1_000, UTC),
+        end,
+    )
+    cursors[symbol] = int(end.timestamp() * 1_000)
+    save_state(state)
+    return _load_trade_partitions(symbol)
 
 
 def _update_mark_cache(
@@ -183,15 +193,17 @@ def _update_mark_cache(
     inception: datetime,
     end: datetime,
 ) -> pd.DataFrame:
-    path = MARKS_DIR / f"{symbol}.csv"
-    cached = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["timestamp_ms", "close"])
-    if not cached.empty:
-        start_ms = max(
+    state = load_state()
+    cursors = state.setdefault("mark_prices_last_fetch_end_ms", {})
+    previous_end_ms = cursors.get(symbol)
+    start_ms = (
+        max(
             int(inception.timestamp() * 1_000),
-            int(cached["timestamp_ms"].max()) - 60 * 60 * 1_000,
+            int(previous_end_ms) - 10 * 60 * 1_000,
         )
-    else:
-        start_ms = int(inception.timestamp() * 1_000)
+        if previous_end_ms is not None
+        else int(inception.timestamp() * 1_000)
+    )
     end_ms = int(end.timestamp() * 1_000)
     rows: list[dict[str, Any]] = []
     cursor = start_ms
@@ -215,13 +227,89 @@ def _update_mark_cache(
         if len(batch) < 1000:
             break
 
-    fresh = pd.DataFrame(rows)
-    combined = fresh if cached.empty else pd.concat([cached, fresh], ignore_index=True)
-    combined["timestamp_ms"] = pd.to_numeric(combined["timestamp_ms"], errors="coerce")
-    combined["close"] = pd.to_numeric(combined["close"], errors="coerce")
-    combined = combined.dropna().drop_duplicates("timestamp_ms", keep="last").sort_values("timestamp_ms")
-    _write_private_csv(path, combined)
-    return combined
+    _merge_mark_partitions(pd.DataFrame(rows).assign(symbol=symbol))
+    cursors[symbol] = end_ms
+    save_state(state)
+    return _load_mark_partitions(symbol)
+
+
+def _merge_trade_partitions(rows: list[dict[str, Any]]) -> None:
+    ensure_private_directory(TRADES_DIR)
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        date = datetime.fromtimestamp(int(row["time"]) / 1_000, UTC).date().isoformat()
+        by_date.setdefault(date, []).append(row)
+    for date, new_rows in by_date.items():
+        path = TRADES_DIR / f"{date}.json.gz"
+        existing = read_json_gzip(path) if path.exists() else []
+        if not isinstance(existing, list):
+            raise RuntimeError("Private trade partition has an invalid shape.")
+        unique = {
+            (str(row.get("symbol")), int(row.get("id", 0))): row
+            for row in [*existing, *new_rows]
+            if row.get("id") is not None and row.get("time") is not None
+        }
+        merged = sorted(unique.values(), key=lambda row: (int(row["time"]), int(row["id"])))
+        write_json_gzip(path, merged)
+
+
+def _load_trade_partitions(symbol: str) -> list[dict[str, Any]]:
+    ensure_private_directory(TRADES_DIR)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(TRADES_DIR.glob("*.json.gz")):
+        payload = read_json_gzip(path)
+        if not isinstance(payload, list):
+            raise RuntimeError("Private trade partition has an invalid shape.")
+        rows.extend(
+            row for row in payload if isinstance(row, dict) and row.get("symbol") == symbol
+        )
+    unique = {
+        int(row["id"]): row
+        for row in rows
+        if row.get("id") is not None and row.get("time") is not None
+    }
+    return sorted(unique.values(), key=lambda row: (int(row["time"]), int(row["id"])))
+
+
+def _ensure_trade_partition_dates(start: datetime, end: datetime) -> None:
+    ensure_private_directory(TRADES_DIR)
+    cursor = start.date()
+    while cursor <= end.date():
+        path = TRADES_DIR / f"{cursor.isoformat()}.json.gz"
+        if not path.exists():
+            write_json_gzip(path, [])
+        cursor += timedelta(days=1)
+
+
+def _merge_mark_partitions(rows: pd.DataFrame) -> None:
+    ensure_private_directory(MARKS_DIR)
+    if rows.empty:
+        return
+    clean = rows.copy()
+    clean["timestamp_ms"] = pd.to_numeric(clean["timestamp_ms"], errors="coerce")
+    clean["close"] = pd.to_numeric(clean["close"], errors="coerce")
+    clean = clean.dropna(subset=["timestamp_ms", "close", "symbol"])
+    clean["date"] = pd.to_datetime(clean["timestamp_ms"], unit="ms", utc=True).dt.strftime("%Y-%m-%d")
+    for date, fresh in clean.groupby("date"):
+        path = MARKS_DIR / f"{date}.csv.gz"
+        existing = pd.read_csv(path, compression="gzip") if path.exists() else pd.DataFrame()
+        combined = fresh.drop(columns="date") if existing.empty else pd.concat(
+            [existing, fresh.drop(columns="date")], ignore_index=True
+        )
+        combined = combined.drop_duplicates(["symbol", "timestamp_ms"], keep="last").sort_values(
+            ["timestamp_ms", "symbol"]
+        )
+        _write_private_csv_gzip(path, combined)
+
+
+def _load_mark_partitions(symbol: str) -> pd.DataFrame:
+    ensure_private_directory(MARKS_DIR)
+    frames = [pd.read_csv(path, compression="gzip") for path in sorted(MARKS_DIR.glob("*.csv.gz"))]
+    if not frames:
+        return pd.DataFrame(columns=["symbol", "timestamp_ms", "close"])
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.loc[combined["symbol"] == symbol].copy()
+    return combined.drop_duplicates("timestamp_ms", keep="last").sort_values("timestamp_ms")
 
 
 def _symbol_unrealized(
@@ -329,27 +417,13 @@ def _first_official_snapshot(
     return timestamp, float(row["margin_balance_usdc"])
 
 
-def _read_json_list(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Private cache is unreadable: {path.name}") from exc
-    if not isinstance(payload, list):
-        raise RuntimeError(f"Private cache has an invalid shape: {path.name}")
-    return [row for row in payload if isinstance(row, dict)]
-
-
-def _write_private_json(path: Path, payload: Any) -> None:
+def _write_private_csv_gzip(path: Path, frame: pd.DataFrame) -> None:
+    ensure_private_directory(path.parent)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-
-
-def _write_private_csv(path: Path, frame: pd.DataFrame) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    frame.to_csv(temporary, index=False)
+    frame.to_csv(
+        temporary,
+        index=False,
+        compression={"method": "gzip", "compresslevel": 6, "mtime": 0},
+    )
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)

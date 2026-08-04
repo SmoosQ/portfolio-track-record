@@ -21,8 +21,10 @@ tail -n 30 local_update.log
 ls -la local_reports
 ```
 
-The private `minute_performance.csv`, `total_equity_curve.png`, and `pnl_components.png` use one-minute sampling. Raw trade and mark-price caches stay under the ignored `data/private/` directory.
+The private `local_reports/minute/*.csv.gz`, `total_equity_curve.png`, and `pnl_components.png` use one-minute sampling. Raw trade and mark-price caches stay under the ignored `data/private/` directory.
 
 Open `local_reports/detailed_report.md` for the private metric summary and chart index.
+
+Private downloads are incremental. `data/private/state.json` stores the last successful cursors, while raw income, trades, mark prices, and snapshots are partitioned by UTC date. A small overlap is re-downloaded and deduplicated to recover delayed or interrupted records.
 
 `stop` does not interrupt an update already in progress; it prevents later scheduled runs. After a reboot, run `start` manually when you want automatic daily updates to resume.

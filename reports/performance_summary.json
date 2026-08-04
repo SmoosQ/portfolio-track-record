@@ -20,7 +20,7 @@
     "sortino_ratio": "Private total daily return including changes in unrealized PnL divided by sample downside deviation, multiplied by sqrt(365); only the ratio is published and the target return is 0.",
     "win_rate": "Positive daily net-PnL days divided by non-zero daily net-PnL days."
   },
-  "generated_at_utc": "2026-08-04T06:44:18Z",
+  "generated_at_utc": "2026-08-04T07:03:02Z",
   "metrics": {
     "annualization_factor": 365,
     "annualized_return": 0.3532287464341868,
@@ -33,8 +33,8 @@
     "number_of_trades": 845,
     "number_of_trading_days": 27,
     "profit_factor": 1086.9616759441194,
-    "sharpe_ratio": 5.2497115608207015,
-    "sortino_ratio": 9.33144315147468,
+    "sharpe_ratio": 5.2391711433397115,
+    "sortino_ratio": 9.313559115693637,
     "total_commission_usdc": -0.07522748,
     "total_funding_fee_usdc": 1.7197712300000003,
     "total_net_pnl_usdc": 118.96964274999999,
