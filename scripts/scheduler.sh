@@ -19,7 +19,7 @@ case "${1:-}" in
     chmod 600 "$ENABLE_FILE"
     echo "Scheduled updates enabled; running one update now."
     cd "$ROOT"
-    exec "$PYTHON" -m src.local_update
+    exec "$PYTHON" -B -m src.local_update
     ;;
   stop)
     rm -f "$ENABLE_FILE"
@@ -43,7 +43,7 @@ case "${1:-}" in
   run)
     [ -f "$ENABLE_FILE" ] || exit 0
     cd "$ROOT"
-    exec "$PYTHON" -m src.local_update
+    exec "$PYTHON" -B -m src.local_update
     ;;
   *)
     echo "Usage: $0 {start|stop|status|run}" >&2

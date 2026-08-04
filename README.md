@@ -75,13 +75,13 @@ python -m pip install -r requirements.txt
 Generate and validate reports without committing or pushing:
 
 ```bash
-.venv/bin/python -m src.local_update --no-push
+.venv/bin/python -B -m src.local_update --no-push
 ```
 
 Generate reports, commit only sanitized outputs, and push them to `origin/main`:
 
 ```bash
-.venv/bin/python -m src.local_update
+.venv/bin/python -B -m src.local_update
 ```
 
 The publisher requires the `main` branch, refuses to run when the Git index already has staged changes, fast-forwards from `origin/main`, validates every required output, and does not create an empty commit.
