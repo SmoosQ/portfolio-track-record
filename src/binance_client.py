@@ -103,8 +103,14 @@ class BinanceReadOnlyClient:
                 f"{self.BASE_URL}/fapi/v1/time",
                 timeout=(self._timeout.connect, self._timeout.read),
             )
+            if response.status_code == 451:
+                raise BinanceResponseError(
+                    "Binance denied this network location (HTTP 451)."
+                )
             response.raise_for_status()
             server_time = int(response.json()["serverTime"])
+        except BinanceResponseError:
+            raise
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
             raise BinanceResponseError("Unable to synchronize with Binance server time.") from exc
         finished = int(time.time() * 1_000)
@@ -161,6 +167,10 @@ class BinanceReadOnlyClient:
             if response.status_code in (401, 403) or error_code in (-2014, -2015):
                 raise BinanceAuthenticationError(
                     "Binance rejected the API credentials or read permissions."
+                )
+            if response.status_code == 451:
+                raise BinanceResponseError(
+                    "Binance denied this network location (HTTP 451)."
                 )
             if not response.ok or (isinstance(error_code, int) and error_code < 0):
                 message = payload.get("msg", "Unknown Binance API error") if isinstance(payload, dict) else "Unknown Binance API error"

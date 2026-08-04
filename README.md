@@ -1,14 +1,10 @@
 # Portfolio Track Record
 
-[![Update Trading Performance](https://github.com/SmoosQ/portfolio-track-record/actions/workflows/update_performance.yml/badge.svg)](https://github.com/SmoosQ/portfolio-track-record/actions/workflows/update_performance.yml)
+A privacy-preserving, locally generated view of live `USDC` USD-M Futures performance from **2026-07-01 00:00 UTC**. This repository is designed for interview and professional evaluation.
 
-A privacy-preserving, automatically refreshed view of live `USDC` USD-M Futures performance from **2026-07-01 00:00 UTC**. This repository is designed for interview and professional evaluation.
-
-GitHub Actions uses Binance read-only endpoints to retrieve daily income history, calculate daily PnL and risk metrics, and update the public charts. No fabricated PnL data is committed.
+The reporting pipeline runs on the owner's machine using the project-specific Python environment. It reads Binance through signed, read-only endpoints, generates daily PnL and risk reports, and pushes only sanitized output files to GitHub. No fabricated PnL data is committed.
 
 ## Latest performance
-
-The images appear after the first successful authenticated workflow run.
 
 ![Normalized USDC equity curve](reports/normalized_equity_curve.png)
 
@@ -25,15 +21,31 @@ Additional outputs:
 
 ## Security model
 
-- Credentials are read only from `BINANCE_API_KEY` and `BINANCE_API_SECRET`.
-- GitHub Actions injects them from Repository Secrets only into the report step.
-- The client exposes two signed `GET` operations: USD-M Futures account information and income history.
+- Credentials exist only in the local `.env` file, which is ignored by Git and must have file mode `600`.
+- The update script accepts only `BINANCE_API_KEY`, `BINANCE_API_SECRET`, and optional `GITHUB_TOKEN`; unknown, duplicate, empty, or missing required entries stop execution.
+- The client exposes only USD-M Futures account and income-history `GET` requests.
 - There is no order, cancellation, deposit, withdrawal, or transfer operation in the code.
 - The program never logs credentials, signatures, query strings, or authentication headers.
-- Missing credentials stop execution with a non-zero status.
 - Absolute account equity and account identifiers are never published. The equity curve starts at `1.0`.
+- Automatic Git commits include only `reports/` and `data/processed/`.
 
 Use a dedicated Binance key with read permission only. Do **not** enable Spot trading, Futures trading, withdrawals, or transfers.
+
+The local credential file must contain exactly:
+
+```dotenv
+BINANCE_API_KEY=your_api_key_here
+BINANCE_API_SECRET=your_api_secret_here
+GITHUB_TOKEN=your_github_token_here
+```
+
+Apply private permissions:
+
+```bash
+chmod 600 .env
+```
+
+`GITHUB_TOKEN` is required only for automatic publishing. Prefer a fine-grained token restricted to this repository with **Contents: Read and write**. The token is passed to Git through a local askpass process and is never stored in the remote URL.
 
 ## Performance scope
 
@@ -44,34 +56,46 @@ Only income rows whose asset is exactly `USDC` are included. Every observation i
 | `REALIZED_PNL` | Included in daily PnL |
 | `COMMISSION` | Included in daily PnL, normally negative |
 | `FUNDING_FEE` | Included in daily PnL with its Binance sign |
-| `TRANSFER` | Used in memory to adjust the return capital base; excluded from PnL and not published as a transfer record |
+| `TRANSFER` | Used in memory to adjust the return capital base; excluded from PnL and never published as a transfer record |
 | Other income types | Conservatively treated as capital adjustments and disclosed as a non-sensitive warning |
 | Unrealized PnL | Not included in this realized daily performance report |
 
 The public CSV contains daily returns, normalized equity, drawdown, daily realized PnL, commission, funding, net PnL, and trade count. It never contains the account balance, API metadata, UID, email, wallet address, or transaction hash.
 
-## GitHub setup and first run
+## Local environment and updates
 
-The repository expects these two **Repository Secrets**, which are never committed:
+Create the isolated environment once:
 
-- `BINANCE_API_KEY`
-- `BINANCE_API_SECRET`
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-To test the first run:
+Generate and validate reports without committing or pushing:
 
-1. Open **Actions** on GitHub.
-2. Select **Update Trading Performance**.
-3. Click **Run workflow** and select `main`.
-4. Confirm the run generates all report files and creates a `chore: update trading performance` commit.
-5. Review the charts and metric definitions before sharing the repository.
+```bash
+.venv/bin/python -m src.local_update --no-push
+```
 
-The workflow runs:
+Generate reports, commit only sanitized outputs, and push them to `origin/main`:
 
-- manually through `workflow_dispatch`;
-- whenever `src/**`, `requirements.txt`, or the workflow file is pushed to `main`;
-- every day at `00:00 UTC` as a fallback.
+```bash
+.venv/bin/python -m src.local_update
+```
 
-It uses `github-actions[bot]` for report commits and does not create an empty commit. If it cannot push, check **Settings → Actions → General → Workflow permissions** and allow read and write permissions.
+The publisher requires the `main` branch, refuses to run when the Git index already has staged changes, fast-forwards from `origin/main`, validates every required output, and does not create an empty commit.
+
+## Local schedule
+
+This machine is configured through the current user's crontab to run every day at **08:10 Asia/Shanghai**, equivalent to **00:10 UTC**:
+
+```cron
+CRON_TZ=Asia/Shanghai
+10 8 * * * cd /data/disk1/portfolio-track-record && /data/disk1/portfolio-track-record/.venv/bin/python -m src.local_update >> /data/disk1/portfolio-track-record/local_update.log 2>&1
+```
+
+The log file and process-lock file are local-only and ignored by Git. The non-blocking lock prevents a scheduled run from overlapping a manual run.
 
 ## Daily metric definitions
 
@@ -96,25 +120,14 @@ Zero denominators, insufficient samples, missing rows, and invalid reconstructed
 
 ## API retention and historical continuity
 
-Binance's standard USD-M Futures income endpoint currently exposes only the latest three months. The workflow requests data in seven-day windows and paginates every window. While July 2026 remains available, the first run establishes the full inception history. Later runs preserve already verified daily rows that have aged out of the API window, overwrite all overlapping days with fresh Binance results, and recompute the entire normalized curve and risk metrics. This makes repeated runs idempotent without duplicating records.
-
-## Local execution
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-export BINANCE_API_KEY="..."
-export BINANCE_API_SECRET="..."
-python -m src.generate_report
-```
+Binance's standard USD-M Futures income endpoint currently exposes only the latest three months. The local updater requests data in seven-day windows and paginates every window. While July 2026 remains available, the first successful run establishes the full inception history. Later runs preserve verified daily rows that have aged out of the API window, overwrite overlapping days with fresh Binance results, and recompute the complete normalized curve and risk metrics.
 
 ## Limitations
 
 - The track record begins on 2026-07-01 and covers USDC USD-M Futures only.
 - Daily flow timing is approximated because only event timestamps and daily aggregation are available. Positive same-day transfers are added to the denominator to avoid overstating returns.
-- The curve is realized-return based. Current unrealized PnL is separate.
+- The curve is realized-return based; unrealized PnL is outside the reported scope.
 - If the account uses multi-asset collateral, the USDC asset row may not capture economic exposure caused by price changes in other collateral assets.
-- The first successful workflow run must occur before July rows age out of Binance's standard income-history retention window.
+- The local machine must remain powered on, connected to the network, and able to access Binance and GitHub at the scheduled time. Cron will run a missed update only at the next scheduled occurrence.
 
 This repository is for interviews and professional evaluation only. It is not investment advice, a solicitation, or a guarantee of future performance.

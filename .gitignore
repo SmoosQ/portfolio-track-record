@@ -1,6 +1,9 @@
 .env
 .env.*
 !.env.example
+api.txt
+local_update.log
+.local_update.lock
 secrets/
 credentials/
 data/raw/
