@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Iterator
 
 from .binance_client import BinanceClientError, BinanceReadOnlyClient
@@ -11,6 +14,8 @@ from .binance_client import BinanceClientError, BinanceReadOnlyClient
 TRACKED_ASSET = "USDC"
 PERFORMANCE_INCEPTION_UTC = datetime(2026, 7, 1, tzinfo=UTC)
 FUTURES_RETENTION_DAYS = 89
+ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_SNAPSHOT_PATH = ROOT / "data" / "private" / "usdc_equity_snapshots.json"
 
 
 @dataclass
@@ -23,6 +28,7 @@ class AccountData:
     asset: str = TRACKED_ASSET
     futures_account: dict[str, Any] | None = None
     futures_income: list[dict[str, Any]] = field(default_factory=list)
+    equity_snapshots: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -54,6 +60,7 @@ def fetch_account_data(
     try:
         account = client.futures_account()
         income = _fetch_futures_income(client, fetch_start, end)
+        snapshots = _fetch_equity_snapshots(client, inception, end, account)
     except BinanceClientError as exc:
         raise RuntimeError(f"Required USD-M Futures read failed: {exc}") from exc
 
@@ -67,7 +74,100 @@ def fetch_account_data(
     data.futures_income = [
         row for row in income if str(row.get("asset", "")).upper() == TRACKED_ASSET
     ]
+    data.equity_snapshots = snapshots
     return data
+
+
+def _fetch_equity_snapshots(
+    client: BinanceReadOnlyClient,
+    inception: datetime,
+    end: datetime,
+    current_account: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Merge Binance daily snapshots with private local history and today's account."""
+
+    query_start = max(inception, end - timedelta(days=29, hours=23))
+    payload = client.futures_account_snapshots(
+        startTime=_to_ms(query_start),
+        endTime=_to_ms(end),
+        limit=30,
+    )
+    if payload.get("code") != 200 or not isinstance(payload.get("snapshotVos"), list):
+        raise BinanceClientError("Unexpected Futures account snapshot response shape.")
+
+    merged = {row["date"]: row for row in _load_private_snapshots()}
+    for snapshot in payload["snapshotVos"]:
+        row = _snapshot_row(snapshot)
+        if row and row["date"] >= inception.date().isoformat():
+            merged[row["date"]] = row
+
+    current_row = _current_account_row(current_account, end)
+    merged[current_row["date"]] = current_row
+    result = [merged[key] for key in sorted(merged) if key >= inception.date().isoformat()]
+    _write_private_snapshots(result)
+    return result
+
+
+def _snapshot_row(snapshot: Any) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("data"), dict):
+        return None
+    asset = _find_asset(snapshot["data"].get("assets"))
+    if asset is None:
+        return None
+    updated = datetime.fromtimestamp(int(snapshot.get("updateTime", 0)) / 1_000, UTC)
+    return _equity_row(updated.date().isoformat(), asset, "binance_daily_snapshot")
+
+
+def _current_account_row(account: dict[str, Any], end: datetime) -> dict[str, Any]:
+    asset = _find_asset(account.get("assets"))
+    if asset is None:
+        raise BinanceClientError("Current Futures account contains no USDC asset row.")
+    return _equity_row(end.date().isoformat(), asset, "current_account")
+
+
+def _find_asset(assets: Any) -> dict[str, Any] | None:
+    if not isinstance(assets, list):
+        return None
+    return next(
+        (row for row in assets if isinstance(row, dict) and row.get("asset") == TRACKED_ASSET),
+        None,
+    )
+
+
+def _equity_row(date: str, asset: dict[str, Any], source: str) -> dict[str, Any]:
+    try:
+        wallet = float(asset["walletBalance"])
+        margin = float(asset["marginBalance"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BinanceClientError("USDC account snapshot has invalid balance fields.") from exc
+    unrealized = float(asset.get("unrealizedProfit", margin - wallet))
+    return {
+        "date": date,
+        "wallet_balance_usdc": wallet,
+        "margin_balance_usdc": margin,
+        "unrealized_pnl_usdc": unrealized,
+        "source": source,
+    }
+
+
+def _load_private_snapshots() -> list[dict[str, Any]]:
+    if not PRIVATE_SNAPSHOT_PATH.exists():
+        return []
+    try:
+        payload = json.loads(PRIVATE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BinanceClientError("Private equity snapshot history is unreadable.") from exc
+    if not isinstance(payload, list):
+        raise BinanceClientError("Private equity snapshot history has an invalid shape.")
+    return [row for row in payload if isinstance(row, dict) and isinstance(row.get("date"), str)]
+
+
+def _write_private_snapshots(rows: list[dict[str, Any]]) -> None:
+    PRIVATE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PRIVATE_SNAPSHOT_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, PRIVATE_SNAPSHOT_PATH)
 
 
 def _fetch_futures_income(

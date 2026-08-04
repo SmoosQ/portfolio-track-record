@@ -27,9 +27,16 @@ REQUIRED_OUTPUTS = (
     ROOT / "reports" / "drawdown_curve.png",
     ROOT / "reports" / "daily_returns.png",
     ROOT / "reports" / "monthly_returns.png",
+    ROOT / "reports" / "key_metrics.png",
     ROOT / "reports" / "performance_summary.json",
     ROOT / "reports" / "performance_summary.md",
     ROOT / "data" / "processed" / "normalized_daily_equity.csv",
+    ROOT / "local_reports" / "detailed_daily_performance.csv",
+    ROOT / "local_reports" / "total_equity_curve.png",
+    ROOT / "local_reports" / "pnl_components.png",
+    ROOT / "local_reports" / "daily_total_returns.png",
+    ROOT / "local_reports" / "monthly_total_returns.png",
+    ROOT / "local_reports" / "detailed_summary.json",
 )
 
 

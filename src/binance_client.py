@@ -48,6 +48,7 @@ class BinanceReadOnlyClient:
     """Signed GET-only client for USD-M Futures account and income data."""
 
     BASE_URL = "https://fapi.binance.com"
+    WALLET_BASE_URL = "https://api.binance.com"
 
     def __init__(
         self,
@@ -96,6 +97,16 @@ class BinanceReadOnlyClient:
 
         return self._signed_get("/fapi/v1/income", params)
 
+    def futures_account_snapshots(self, **params: Any) -> dict[str, Any]:
+        """Read official daily Futures account snapshots from Binance Wallet."""
+
+        query = {"type": "FUTURES", **params}
+        return self._signed_get(
+            "/sapi/v1/accountSnapshot",
+            query,
+            base_url=self.WALLET_BASE_URL,
+        )
+
     def _sync_server_time(self) -> None:
         started = int(time.time() * 1_000)
         try:
@@ -117,7 +128,13 @@ class BinanceReadOnlyClient:
         self._time_offset_ms = server_time - ((started + finished) // 2)
         self._time_is_synchronized = True
 
-    def _signed_get(self, path: str, params: Mapping[str, Any]) -> Any:
+    def _signed_get(
+        self,
+        path: str,
+        params: Mapping[str, Any],
+        *,
+        base_url: str | None = None,
+    ) -> Any:
         """Perform a signed GET without logging headers, query strings, or signatures."""
 
         if not self._time_is_synchronized:
@@ -131,7 +148,7 @@ class BinanceReadOnlyClient:
             signature = hmac.new(
                 self._api_secret, query.encode("utf-8"), hashlib.sha256
             ).hexdigest()
-            url = f"{self.BASE_URL}{path}?{query}&signature={signature}"
+            url = f"{base_url or self.BASE_URL}{path}?{query}&signature={signature}"
 
             try:
                 response = self._session.get(

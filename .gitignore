@@ -7,6 +7,8 @@ local_update.log
 secrets/
 credentials/
 data/raw/
+data/private/
+local_reports/
 __pycache__/
 **/__pycache__/
 *.pyc

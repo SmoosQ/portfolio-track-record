@@ -6,6 +6,8 @@ The reporting pipeline runs on the owner's machine using the project-specific Py
 
 ## Latest performance
 
+![Key USDC performance metrics](reports/key_metrics.png)
+
 ![Normalized USDC equity curve](reports/normalized_equity_curve.png)
 
 ![Cumulative USDC PnL](reports/cumulative_pnl_curve.png)
@@ -27,6 +29,7 @@ Additional outputs:
 - There is no order, cancellation, deposit, withdrawal, or transfer operation in the code.
 - The program never logs credentials, signatures, query strings, or authentication headers.
 - Absolute account equity and account identifiers are never published. The equity curve starts at `1.0`.
+- Daily unrealized PnL, positions, and total-equity history remain in ignored local-only files. Only the aggregate Sharpe and Sortino ratios calculated from total returns are published.
 - Automatic Git commits include only `reports/` and `data/processed/`.
 
 Use a dedicated Binance key with read permission only. Do **not** enable Spot trading, Futures trading, withdrawals, or transfers.
@@ -58,9 +61,11 @@ Only income rows whose asset is exactly `USDC` are included. Every observation i
 | `FUNDING_FEE` | Included in daily PnL with its Binance sign |
 | `TRANSFER` | Used in memory to adjust the return capital base; excluded from PnL and never published as a transfer record |
 | Other income types | Conservatively treated as capital adjustments and disclosed as a non-sensitive warning |
-| Unrealized PnL | Not included in this realized daily performance report |
+| Unrealized PnL | Kept local; included only in the published aggregate Sharpe and Sortino ratios |
 
 The public CSV contains daily returns, normalized equity, drawdown, daily realized PnL, commission, funding, net PnL, and trade count. It never contains the account balance, API metadata, UID, email, wallet address, or transaction hash.
+
+Private detailed outputs are written to `local_reports/`, and the underlying official USDC equity snapshots are retained in `data/private/`. Both directories are ignored by Git. They contain the total equity curve, realized and unrealized PnL, and daily/monthly returns including unrealized PnL.
 
 ## Local environment and updates
 
@@ -125,7 +130,7 @@ Binance's standard USD-M Futures income endpoint currently exposes only the late
 
 - The track record begins on 2026-07-01 and covers USDC USD-M Futures only.
 - Daily flow timing is approximated because only event timestamps and daily aggregation are available. Positive same-day transfers are added to the denominator to avoid overstating returns.
-- The curve is realized-return based; unrealized PnL is outside the reported scope.
+- Public curves and daily files are realized-return based. Unrealized PnL is retained locally and affects only the published aggregate Sharpe and Sortino ratios.
 - If the account uses multi-asset collateral, the USDC asset row may not capture economic exposure caused by price changes in other collateral assets.
 - The local machine must remain powered on, connected to the network, and able to access Binance and GitHub at the scheduled time. Cron will run a missed update only at the next scheduled occurrence.
 

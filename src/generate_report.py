@@ -25,6 +25,7 @@ LOGGER = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS_DIR = ROOT / "reports"
 PROCESSED_DIR = ROOT / "data" / "processed"
+LOCAL_REPORTS_DIR = ROOT / "local_reports"
 BLUE = "#2563EB"
 BLUE_DARK = "#1E3A8A"
 GOLD = "#D4A72C"
@@ -38,15 +39,24 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    LOCAL_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(LOCAL_REPORTS_DIR, 0o700)
 
     historical_daily = _load_historical_daily()
+    historical_private_daily = _load_private_daily()
     with BinanceReadOnlyClient() as client:
         account_data = fetch_account_data(client)
-    result = calculate_performance(account_data, historical_daily)
+    result = calculate_performance(
+        account_data,
+        historical_daily,
+        historical_private_daily,
+    )
     generated_at = datetime.now(UTC).replace(microsecond=0)
 
     _write_normalized_csv(result)
     _write_charts(result)
+    _write_key_metrics(result)
+    _write_private_reports(result, generated_at)
     summary = _build_summary(result, generated_at)
     _write_json(REPORTS_DIR / "performance_summary.json", summary)
     _write_markdown(REPORTS_DIR / "performance_summary.md", summary)
@@ -130,6 +140,83 @@ def _write_charts(result: PerformanceResult) -> None:
     _save_figure(fig, REPORTS_DIR / "monthly_returns.png")
 
 
+def _write_key_metrics(result: PerformanceResult) -> None:
+    """Publish high-level metrics without exposing daily unrealized PnL."""
+
+    metrics = result.metrics
+    entries = [
+        ("Realized cumulative return", _format_metric(metrics.get("cumulative_return"), percent=True)),
+        ("Realized maximum drawdown", _format_metric(metrics.get("maximum_drawdown"), percent=True)),
+        ("Sharpe · incl. unrealized", _format_metric(metrics.get("sharpe_ratio"))),
+        ("Sortino · incl. unrealized", _format_metric(metrics.get("sortino_ratio"))),
+        ("Realized net PnL", _format_metric(metrics.get("total_net_pnl_usdc"), suffix=" USDC")),
+        ("Realized win rate", _format_metric(metrics.get("win_rate"), percent=True)),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(12, 4.2), dpi=160, facecolor="white")
+    for ax, (label, value) in zip(axes.flat, entries):
+        ax.axis("off")
+        ax.text(0.5, 0.62, value, ha="center", va="center", fontsize=19, fontweight="bold", color=BLUE_DARK)
+        ax.text(0.5, 0.28, label, ha="center", va="center", fontsize=9.5, color="#5C667A")
+    fig.suptitle("USDC Performance at a Glance", x=0.04, y=0.97, ha="left", fontsize=16, fontweight="bold", color=INK)
+    fig.text(0.04, 0.02, "Only Sharpe and Sortino use private total returns including unrealized PnL; no unrealized amounts are published.", fontsize=8.5, color="#5C667A")
+    _save_figure(fig, REPORTS_DIR / "key_metrics.png")
+
+
+def _write_private_reports(result: PerformanceResult, generated_at: datetime) -> None:
+    """Write detailed total-equity artifacts to the ignored local-only directory."""
+
+    daily = result.private_daily.copy()
+    public = daily.reset_index().rename(columns={"index": "date"})
+    public["date"] = public["date"].dt.strftime("%Y-%m-%d")
+    _atomic_private_csv(LOCAL_REPORTS_DIR / "detailed_daily_performance.csv", public)
+
+    dates = daily.index.tz_localize(None)
+    fig, ax = _figure("Local Total Equity Curve", "Includes realized and unrealized USDC PnL · private local output")
+    ax.plot(dates, daily["normalized_total_equity"], color=BLUE, linewidth=2.2)
+    ax.axhline(1.0, color=INK, linewidth=1.0, linestyle="--", alpha=0.7)
+    ax.set_ylabel("Normalized total equity")
+    _finish_private_time_axis(fig, ax, LOCAL_REPORTS_DIR / "total_equity_curve.png")
+
+    fig, ax = _figure("Local PnL Components", "Realized net PnL and end-of-day unrealized PnL · private local output")
+    ax.plot(dates, daily["daily_net_pnl_usdc"].cumsum(), color=BLUE, linewidth=2.0, label="Cumulative realized net PnL")
+    ax.plot(dates, daily["end_unrealized_pnl_usdc"], color=GOLD, linewidth=1.8, label="End-of-day unrealized PnL")
+    ax.axhline(0, color=INK, linewidth=1.0)
+    ax.set_ylabel("PnL (USDC)")
+    ax.legend(frameon=False)
+    _finish_private_time_axis(fig, ax, LOCAL_REPORTS_DIR / "pnl_components.png")
+
+    valid = daily["daily_total_return"].dropna() * 100
+    fig, ax = _figure("Local Daily Total Returns", "Includes realized and unrealized PnL · private local output")
+    colors = [BLUE if value >= 0 else GOLD for value in valid]
+    ax.bar(valid.index.tz_localize(None), valid, color=colors, width=0.85)
+    ax.axhline(0, color=INK, linewidth=1.0)
+    ax.set_ylabel("Daily total return (%)")
+    _finish_private_time_axis(fig, ax, LOCAL_REPORTS_DIR / "daily_total_returns.png")
+
+    monthly = (1.0 + daily["daily_total_return"].dropna()).resample("ME").prod() - 1.0
+    labels = [timestamp.strftime("%Y-%m") for timestamp in monthly.index]
+    values = monthly.to_numpy() * 100
+    fig, ax = _figure("Local Monthly Total Returns", "Includes realized and unrealized PnL · private local output")
+    positions = np.arange(len(labels))
+    colors = [BLUE if value >= 0 else GOLD for value in values]
+    ax.bar(positions, values, color=colors)
+    ax.axhline(0, color=INK, linewidth=1.0)
+    ax.set_ylabel("Monthly total return (%)")
+    ax.set_xticks(positions, labels, rotation=45, ha="right")
+    _save_figure(fig, LOCAL_REPORTS_DIR / "monthly_total_returns.png")
+    os.chmod(LOCAL_REPORTS_DIR / "monthly_total_returns.png", 0o600)
+
+    summary = {
+        "generated_at_utc": generated_at.isoformat().replace("+00:00", "Z"),
+        "privacy": "Local only; contains absolute equity and unrealized PnL.",
+        "metrics": _json_safe(result.private_metrics),
+        "monthly_total_returns": {
+            date.strftime("%Y-%m"): float(value) for date, value in monthly.items()
+        },
+    }
+    _write_private_json(LOCAL_REPORTS_DIR / "detailed_summary.json", summary)
+
+
 def _figure(title: str, subtitle: str) -> tuple[plt.Figure, plt.Axes]:
     plt.rcParams.update(
         {
@@ -157,6 +244,14 @@ def _finish_time_axis(fig: plt.Figure, ax: plt.Axes, path: Path) -> None:
     ax.xaxis.set_major_locator(locator)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
     _save_figure(fig, path)
+
+
+def _finish_private_time_axis(fig: plt.Figure, ax: plt.Axes, path: Path) -> None:
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=10)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    _save_figure(fig, path)
+    os.chmod(path, 0o600)
 
 
 def _save_figure(fig: plt.Figure, path: Path) -> None:
@@ -226,6 +321,7 @@ Coverage: **{summary['coverage_start_utc']} to {summary['coverage_end_utc']} (UT
 Scope: **{summary['performance_scope']}**
 
 Absolute account values are not published. USD-M Futures transfers are excluded from trading return.
+Sharpe and Sortino use private total daily returns including unrealized PnL; unrealized amounts and daily total returns are not published.
 
 | Metric | Value |
 |---|---:|
@@ -262,6 +358,39 @@ def _load_historical_daily() -> pd.DataFrame | None:
         return pd.read_csv(path)
     except (OSError, pd.errors.ParserError) as exc:
         raise RuntimeError("Existing normalized daily history could not be read safely.") from exc
+
+
+def _load_private_daily() -> pd.DataFrame | None:
+    path = LOCAL_REPORTS_DIR / "detailed_daily_performance.csv"
+    if not path.exists():
+        return None
+    try:
+        return pd.read_csv(path)
+    except (OSError, pd.errors.ParserError) as exc:
+        raise RuntimeError("Existing private daily history could not be read safely.") from exc
+
+
+def _atomic_private_csv(path: Path, frame: pd.DataFrame) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    frame.to_csv(temporary, index=False, float_format="%.10f")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _format_metric(value: Any, *, percent: bool = False, suffix: str = "") -> str:
+    if value is None:
+        return "N/A"
+    number = float(value)
+    if percent:
+        return f"{number * 100:.2f}%"
+    return f"{number:.3f}{suffix}"
 
 
 def _json_safe(value: Any) -> Any:

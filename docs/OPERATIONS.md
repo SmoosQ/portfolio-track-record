@@ -16,6 +16,9 @@ Run these commands from `/data/disk1/portfolio-track-record`:
 
 # View recent output
 tail -n 30 local_update.log
+
+# List private detailed reports, including unrealized PnL
+ls -la local_reports
 ```
 
 `stop` does not interrupt an update already in progress; it prevents later scheduled runs. After a reboot, run `start` manually when you want automatic daily updates to resume.

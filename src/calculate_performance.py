@@ -32,10 +32,14 @@ class PerformanceResult:
     definitions: dict[str, str]
     warnings: list[str]
     api_window_start_utc: str
+    private_daily: pd.DataFrame
+    private_metrics: dict[str, Any]
 
 
 def calculate_performance(
-    data: AccountData, historical_daily: pd.DataFrame | None = None
+    data: AccountData,
+    historical_daily: pd.DataFrame | None = None,
+    historical_private_daily: pd.DataFrame | None = None,
 ) -> PerformanceResult:
     """Build an inception-to-date series, preserving verified rows beyond API retention."""
 
@@ -52,6 +56,10 @@ def calculate_performance(
     daily["drawdown"] = daily["normalized_equity"] / daily["normalized_equity"].cummax() - 1.0
 
     metrics = _metrics(daily)
+    private_daily = _private_total_daily(data, daily, historical_private_daily)
+    private_metrics = _private_total_metrics(private_daily)
+    metrics["sharpe_ratio"] = private_metrics["sharpe_ratio"]
+    metrics["sortino_ratio"] = private_metrics["sortino_ratio"]
     warnings = list(data.warnings)
     ignored_types = sorted(
         {
@@ -69,6 +77,11 @@ def calculate_performance(
         warnings.append(
             f"{metrics['excluded_return_days']} day(s) were excluded from ratios because the reconstructed capital base was invalid."
         )
+    if private_metrics["coverage_start_utc"] and private_metrics["coverage_start_utc"] > data.inception_utc.date().isoformat():
+        warnings.append(
+            "Sharpe and Sortino include unrealized PnL and begin on "
+            f"{private_metrics['coverage_start_utc']} because earlier official equity snapshots are unavailable."
+        )
 
     return PerformanceResult(
         daily=daily,
@@ -76,7 +89,117 @@ def calculate_performance(
         definitions=metric_definitions(),
         warnings=warnings,
         api_window_start_utc=data.fetch_start_utc.date().isoformat(),
+        private_daily=private_daily,
+        private_metrics=private_metrics,
     )
+
+
+def _private_total_daily(
+    data: AccountData,
+    public_daily: pd.DataFrame,
+    historical: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Build the private daily total-return series from authoritative equity snapshots."""
+
+    frame = pd.DataFrame(index=public_daily.index)
+    for column in (
+        "daily_realized_pnl_usdc",
+        "daily_commission_usdc",
+        "daily_funding_fee_usdc",
+        "daily_net_pnl_usdc",
+    ):
+        frame[column] = public_daily[column]
+
+    snapshots = pd.DataFrame(data.equity_snapshots)
+    if not snapshots.empty:
+        snapshots["date"] = pd.to_datetime(snapshots["date"], utc=True, errors="coerce")
+        snapshots = snapshots.dropna(subset=["date"]).set_index("date").sort_index()
+        snapshots = snapshots[~snapshots.index.duplicated(keep="last")]
+        frame["end_wallet_balance_usdc"] = snapshots["wallet_balance_usdc"]
+        frame["end_equity_usdc"] = snapshots["margin_balance_usdc"]
+        frame["end_unrealized_pnl_usdc"] = snapshots["unrealized_pnl_usdc"]
+    else:
+        frame[["end_wallet_balance_usdc", "end_equity_usdc", "end_unrealized_pnl_usdc"]] = np.nan
+
+    income = _income_frame(data.futures_income)
+    capital = pd.Series(dtype=float)
+    if not income.empty:
+        capital = income.groupby("date", observed=True)["capital_flow"].sum()
+    available_dates = pd.date_range(
+        pd.Timestamp(data.fetch_start_utc).tz_convert("UTC").normalize(),
+        pd.Timestamp(data.end_utc).tz_convert("UTC").normalize(),
+        freq="D",
+        tz="UTC",
+    )
+    frame["capital_adjustment_usdc"] = pd.Series(0.0, index=available_dates).add(
+        capital, fill_value=0.0
+    )
+    frame["daily_unrealized_pnl_change_usdc"] = frame["end_unrealized_pnl_usdc"].diff()
+    frame["daily_total_pnl_usdc"] = (
+        frame["daily_net_pnl_usdc"] + frame["daily_unrealized_pnl_change_usdc"]
+    )
+    previous_equity = frame["end_equity_usdc"].shift(1)
+    denominator = previous_equity + frame["capital_adjustment_usdc"].clip(lower=0)
+    frame["daily_total_return"] = np.where(
+        denominator > 0,
+        frame["daily_total_pnl_usdc"] / denominator,
+        np.nan,
+    )
+    frame.loc[frame["daily_total_return"] <= -1, "daily_total_return"] = np.nan
+
+    private_columns = list(frame.columns) + ["normalized_total_equity", "total_drawdown"]
+    if historical is not None and not historical.empty:
+        previous = historical.copy()
+        if "date" in previous.columns:
+            previous["date"] = pd.to_datetime(previous["date"], utc=True, errors="coerce")
+            previous = previous.dropna(subset=["date"]).set_index("date")
+        if isinstance(previous.index, pd.DatetimeIndex):
+            previous.index = (
+                previous.index.tz_localize("UTC")
+                if previous.index.tz is None
+                else previous.index.tz_convert("UTC")
+            )
+            for column in frame.columns:
+                if column in previous.columns:
+                    frame[column] = frame[column].combine_first(previous[column])
+
+    total_return = frame["daily_total_return"]
+    normalized = pd.Series(np.nan, index=frame.index, dtype=float)
+    valid_positions = np.flatnonzero(total_return.notna().to_numpy())
+    if len(valid_positions):
+        first_position = int(valid_positions[0])
+        if first_position > 0:
+            normalized.iloc[first_position - 1] = 1.0
+        normalized.iloc[first_position:] = (1.0 + total_return.iloc[first_position:]).cumprod(
+            skipna=False
+        )
+    frame["normalized_total_equity"] = normalized
+    frame["total_drawdown"] = (
+        frame["normalized_total_equity"] / frame["normalized_total_equity"].cummax() - 1.0
+    )
+    return frame[[column for column in private_columns if column in frame.columns]]
+
+
+def _private_total_metrics(daily: pd.DataFrame) -> dict[str, Any]:
+    returns = daily["daily_total_return"].dropna()
+    chain = (1.0 + returns).cumprod()
+    cumulative = float(chain.iloc[-1] - 1.0) if not chain.empty else None
+    drawdown = chain / chain.cummax() - 1.0 if not chain.empty else pd.Series(dtype=float)
+    total_pnl = daily["daily_total_pnl_usdc"].dropna()
+    latest_unrealized = daily["end_unrealized_pnl_usdc"].dropna()
+    return {
+        "coverage_start_utc": returns.index.min().date().isoformat() if not returns.empty else None,
+        "coverage_end_utc": returns.index.max().date().isoformat() if not returns.empty else None,
+        "cumulative_return": cumulative,
+        "annualized_return": _annualized_return(cumulative, len(returns)) if cumulative is not None else None,
+        "annualized_volatility": _annualized_volatility(returns),
+        "sharpe_ratio": _sharpe(returns),
+        "sortino_ratio": _sortino(returns),
+        "maximum_drawdown": float(drawdown.min()) if not drawdown.empty else None,
+        "latest_unrealized_pnl_usdc": float(latest_unrealized.iloc[-1]) if not latest_unrealized.empty else None,
+        "total_pnl_usdc": float(total_pnl.sum()) if not total_pnl.empty else None,
+        "valid_return_days": int(len(returns)),
+    }
 
 
 def _current_api_window(data: AccountData, current_wallet: float) -> pd.DataFrame:
@@ -202,8 +325,8 @@ def metric_definitions() -> dict[str, str]:
         "cumulative_return": "Product of (1 + daily return) minus 1.",
         "annualized_return": "Geometric cumulative return annualized with 365 calendar days.",
         "annualized_volatility": "Sample standard deviation of daily returns multiplied by sqrt(365).",
-        "sharpe_ratio": "Mean daily return divided by sample daily standard deviation, multiplied by sqrt(365); risk-free rate is 0.",
-        "sortino_ratio": "Mean daily return divided by sample downside deviation, multiplied by sqrt(365); target return is 0.",
+        "sharpe_ratio": "Private total daily return including changes in unrealized PnL divided by sample daily standard deviation, multiplied by sqrt(365); only the ratio is published and the risk-free rate is 0.",
+        "sortino_ratio": "Private total daily return including changes in unrealized PnL divided by sample downside deviation, multiplied by sqrt(365); only the ratio is published and the target return is 0.",
         "maximum_drawdown": "Largest decline from a prior peak in normalized equity.",
         "calmar_ratio": "Annualized return divided by the absolute maximum drawdown.",
         "win_rate": "Positive daily net-PnL days divided by non-zero daily net-PnL days.",
@@ -227,7 +350,7 @@ def _income_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
                 "realized_pnl": amount if income_type == "REALIZED_PNL" else 0.0,
                 "commission": amount if income_type == "COMMISSION" else 0.0,
                 "funding_fee": amount if income_type == "FUNDING_FEE" else 0.0,
-                "capital_flow": amount if income_type == "TRANSFER" else 0.0,
+                "capital_flow": amount if income_type not in PERFORMANCE_TYPES else 0.0,
                 "trade_id": str(record.get("tradeId", "") or ""),
             }
         )
