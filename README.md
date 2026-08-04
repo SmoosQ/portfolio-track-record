@@ -88,14 +88,13 @@ The publisher requires the `main` branch, refuses to run when the Git index alre
 
 ## Local schedule
 
-This machine is configured through the current user's crontab to run every day at **08:10 Asia/Shanghai**, equivalent to **00:10 UTC**:
+This machine has a local schedule for **08:10 Asia/Shanghai**. A temporary enable flag is cleared by every reboot, so updates do not resume until they are manually enabled again.
 
-```cron
-CRON_TZ=Asia/Shanghai
-10 8 * * * cd /data/disk1/portfolio-track-record && /data/disk1/portfolio-track-record/.venv/bin/python -m src.local_update >> /data/disk1/portfolio-track-record/local_update.log 2>&1
+```bash
+./scripts/scheduler.sh start
 ```
 
-The log file and process-lock file are local-only and ignored by Git. The non-blocking lock prevents a scheduled run from overlapping a manual run.
+There is no continuously running daemon. The log file, enable flag, and process-lock file are local-only. The non-blocking lock prevents overlapping updates. See [Local Operations](docs/OPERATIONS.md) for the short start, status, stop, and log commands.
 
 ## Daily metric definitions
 

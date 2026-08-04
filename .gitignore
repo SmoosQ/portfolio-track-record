@@ -11,6 +11,7 @@ __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
+*.tmp
 .venv/
 venv/
 .ipynb_checkpoints/
