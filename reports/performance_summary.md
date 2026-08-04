@@ -1,6 +1,6 @@
 # Performance Summary
 
-Generated at: **2026-08-04T05:57:04Z**<br>
+Generated at: **2026-08-04T06:08:33Z**<br>
 Coverage: **2026-07-01 to 2026-08-04 (UTC)**<br>
 Scope: **Daily USDC USD-M Futures realized performance**
 

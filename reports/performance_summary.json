@@ -20,7 +20,7 @@
     "sortino_ratio": "Mean daily return divided by sample downside deviation, multiplied by sqrt(365); target return is 0.",
     "win_rate": "Positive daily net-PnL days divided by non-zero daily net-PnL days."
   },
-  "generated_at_utc": "2026-08-04T05:57:04Z",
+  "generated_at_utc": "2026-08-04T06:08:33Z",
   "metrics": {
     "annualization_factor": 365,
     "annualized_return": 0.3526134756639554,
