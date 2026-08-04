@@ -107,6 +107,47 @@ class BinanceReadOnlyClient:
             base_url=self.WALLET_BASE_URL,
         )
 
+    def futures_user_trades(self, **params: Any) -> list[dict[str, Any]]:
+        """Read account trades for one USD-M Futures symbol."""
+
+        return self._signed_get("/fapi/v1/userTrades", params)
+
+    def mark_price_klines(self, **params: Any) -> list[list[Any]]:
+        """Read public mark-price klines for one USD-M Futures symbol."""
+
+        return self._public_get("/fapi/v1/markPriceKlines", params)
+
+    def _public_get(self, path: str, params: Mapping[str, Any]) -> Any:
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._session.get(
+                    f"{self.BASE_URL}{path}",
+                    params=dict(params),
+                    timeout=(self._timeout.connect, self._timeout.read),
+                )
+            except requests.RequestException as exc:
+                if attempt >= self._max_retries:
+                    raise BinanceResponseError(
+                        f"Network failure while reading Binance endpoint {path}."
+                    ) from exc
+                self._backoff(attempt)
+                continue
+            if response.status_code in (418, 429):
+                if attempt >= self._max_retries:
+                    raise BinanceRateLimitError(
+                        f"Binance rate limit persisted for endpoint {path}."
+                    )
+                time.sleep(self._retry_after(response, attempt))
+                continue
+            if response.status_code >= 500 and attempt < self._max_retries:
+                self._backoff(attempt)
+                continue
+            payload = self._safe_json(response, path)
+            if not response.ok:
+                raise BinanceResponseError(f"Binance endpoint {path} failed.")
+            return payload
+        raise BinanceResponseError(f"Unexpected retry exhaustion for endpoint {path}.")
+
     def _sync_server_time(self) -> None:
         started = int(time.time() * 1_000)
         try:

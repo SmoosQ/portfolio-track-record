@@ -20,6 +20,7 @@ import pandas as pd
 from .binance_client import BinanceReadOnlyClient
 from .calculate_performance import PerformanceResult, calculate_performance
 from .fetch_account_data import fetch_account_data
+from .minute_performance import MinutePerformance, build_minute_performance
 
 LOGGER = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,7 @@ def main() -> int:
     historical_private_daily = _load_private_daily()
     with BinanceReadOnlyClient() as client:
         account_data = fetch_account_data(client)
+        minute_result = build_minute_performance(client, account_data)
     result = calculate_performance(
         account_data,
         historical_daily,
@@ -56,7 +58,7 @@ def main() -> int:
     _write_normalized_csv(result)
     _write_charts(result)
     _write_key_metrics(result)
-    _write_private_reports(result, generated_at)
+    _write_private_reports(result, minute_result, generated_at)
     summary = _build_summary(result, generated_at)
     _write_json(REPORTS_DIR / "performance_summary.json", summary)
     _write_markdown(REPORTS_DIR / "performance_summary.md", summary)
@@ -162,7 +164,11 @@ def _write_key_metrics(result: PerformanceResult) -> None:
     _save_figure(fig, REPORTS_DIR / "key_metrics.png")
 
 
-def _write_private_reports(result: PerformanceResult, generated_at: datetime) -> None:
+def _write_private_reports(
+    result: PerformanceResult,
+    minute_result: MinutePerformance,
+    generated_at: datetime,
+) -> None:
     """Write detailed total-equity artifacts to the ignored local-only directory."""
 
     daily = result.private_daily.copy()
@@ -170,20 +176,42 @@ def _write_private_reports(result: PerformanceResult, generated_at: datetime) ->
     public["date"] = public["date"].dt.strftime("%Y-%m-%d")
     _atomic_private_csv(LOCAL_REPORTS_DIR / "detailed_daily_performance.csv", public)
 
-    dates = daily.index.tz_localize(None)
-    fig, ax = _figure("Local Total Equity Curve", "Includes realized and unrealized USDC PnL · private local output")
-    ax.plot(dates, daily["normalized_total_equity"], color=BLUE, linewidth=2.2)
+    minute = minute_result.daily.copy().reset_index()
+    minute["timestamp_utc"] = minute["timestamp_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    _atomic_private_csv(LOCAL_REPORTS_DIR / "minute_performance.csv", minute)
+
+    minute_daily = minute_result.daily
+    minute_dates = minute_daily.index.tz_localize(None)
+    fig, ax = _figure("Local Minute Total Equity Curve", "One-minute points · realized + unrealized USDC PnL · private local output")
+    ax.plot(minute_dates, minute_daily["normalized_total_equity"], color=BLUE, linewidth=1.25)
     ax.axhline(1.0, color=INK, linewidth=1.0, linestyle="--", alpha=0.7)
     ax.set_ylabel("Normalized total equity")
     _finish_private_time_axis(fig, ax, LOCAL_REPORTS_DIR / "total_equity_curve.png")
 
-    fig, ax = _figure("Local PnL Components", "Realized net PnL and end-of-day unrealized PnL · private local output")
-    ax.plot(dates, daily["daily_net_pnl_usdc"].cumsum(), color=BLUE, linewidth=2.0, label="Cumulative realized net PnL")
-    ax.plot(dates, daily["end_unrealized_pnl_usdc"], color=GOLD, linewidth=1.8, label="End-of-day unrealized PnL")
+    fig, ax = _figure("Local Minute PnL Components", "One-minute points · private local output")
+    ax.plot(minute_dates, minute_daily["cumulative_realized_net_pnl_usdc"], color=BLUE, linewidth=1.5, label="Cumulative realized net PnL")
+    ax.plot(minute_dates, minute_daily["unrealized_pnl_usdc"], color=GOLD, linewidth=1.25, label="Unrealized PnL")
+    ax.plot(minute_dates, minute_daily["combined_realized_plus_unrealized_pnl_usdc"], color=BLUE_DARK, linewidth=1.6, label="Realized + unrealized PnL")
     ax.axhline(0, color=INK, linewidth=1.0)
     ax.set_ylabel("PnL (USDC)")
     ax.legend(frameon=False)
     _finish_private_time_axis(fig, ax, LOCAL_REPORTS_DIR / "pnl_components.png")
+
+    fig, ax = _figure("Local Daily PnL Components", "Realized, change in unrealized, and total PnL by UTC day · private local output")
+    daily_dates = daily.index.tz_localize(None)
+    positions = np.arange(len(daily_dates))
+    width = 0.26
+    ax.bar(positions - width, daily["daily_net_pnl_usdc"], width=width, color=BLUE, label="Realized net PnL")
+    ax.bar(positions, daily["daily_unrealized_pnl_change_usdc"], width=width, color=GOLD, label="Change in unrealized PnL")
+    ax.bar(positions + width, daily["daily_total_pnl_usdc"], width=width, color=BLUE_DARK, label="Total PnL")
+    tick_step = max(1, len(daily_dates) // 8)
+    tick_positions = positions[::tick_step]
+    ax.set_xticks(tick_positions, [daily_dates[index].strftime("%b %d") for index in tick_positions], rotation=45, ha="right")
+    ax.axhline(0, color=INK, linewidth=1.0)
+    ax.set_ylabel("Daily PnL (USDC)")
+    ax.legend(frameon=False)
+    _save_figure(fig, LOCAL_REPORTS_DIR / "daily_pnl_components.png")
+    os.chmod(LOCAL_REPORTS_DIR / "daily_pnl_components.png", 0o600)
 
     valid = daily["daily_total_return"].dropna() * 100
     fig, ax = _figure("Local Daily Total Returns", "Includes realized and unrealized PnL · private local output")
@@ -210,11 +238,17 @@ def _write_private_reports(result: PerformanceResult, generated_at: datetime) ->
         "generated_at_utc": generated_at.isoformat().replace("+00:00", "Z"),
         "privacy": "Local only; contains absolute equity and unrealized PnL.",
         "metrics": _json_safe(result.private_metrics),
+        "minute_coverage_start_utc": minute_result.daily.index.min().isoformat(),
+        "minute_coverage_end_utc": minute_result.daily.index.max().isoformat(),
+        "minute_observations": int(len(minute_result.daily)),
+        "minute_symbol_count": minute_result.symbol_count,
+        "minute_methodology_warnings": minute_result.warnings,
         "monthly_total_returns": {
             date.strftime("%Y-%m"): float(value) for date, value in monthly.items()
         },
     }
     _write_private_json(LOCAL_REPORTS_DIR / "detailed_summary.json", summary)
+    _write_private_markdown(LOCAL_REPORTS_DIR / "detailed_report.md", summary)
 
 
 def _figure(title: str, subtitle: str) -> tuple[plt.Figure, plt.Axes]:
@@ -380,6 +414,47 @@ def _atomic_private_csv(path: Path, frame: pd.DataFrame) -> None:
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _write_private_markdown(path: Path, summary: dict[str, Any]) -> None:
+    metrics = summary["metrics"]
+    content = f"""# Private USDC Performance Report
+
+Generated: **{summary['generated_at_utc']}**<br>
+Minute coverage: **{summary['minute_coverage_start_utc']} to {summary['minute_coverage_end_utc']}**<br>
+Minute observations: **{summary['minute_observations']:,}**
+
+## Total-return metrics
+
+| Metric | Value |
+|---|---:|
+| Cumulative return | {_format_metric(metrics.get('cumulative_return'), percent=True)} |
+| Annualized return | {_format_metric(metrics.get('annualized_return'), percent=True)} |
+| Annualized volatility | {_format_metric(metrics.get('annualized_volatility'), percent=True)} |
+| Sharpe ratio | {_format_metric(metrics.get('sharpe_ratio'))} |
+| Sortino ratio | {_format_metric(metrics.get('sortino_ratio'))} |
+| Maximum drawdown | {_format_metric(metrics.get('maximum_drawdown'), percent=True)} |
+| Latest unrealized PnL | {_format_metric(metrics.get('latest_unrealized_pnl_usdc'), suffix=' USDC')} |
+| Total PnL | {_format_metric(metrics.get('total_pnl_usdc'), suffix=' USDC')} |
+
+## Charts and data
+
+- `total_equity_curve.png`: one-minute total equity curve
+- `pnl_components.png`: one-minute cumulative realized, unrealized, and combined PnL
+- `daily_pnl_components.png`: daily realized, unrealized change, and total PnL
+- `daily_total_returns.png`: daily total returns
+- `monthly_total_returns.png`: monthly total returns
+- `minute_performance.csv`: private minute-level data
+- `detailed_daily_performance.csv`: private daily data
+
+## Method
+
+Minute unrealized PnL is reconstructed from private account trades and Binance one-minute mark prices, then calibrated to official daily account snapshots. Daily and monthly total returns include realized and unrealized PnL. Raw trades, mark prices, absolute equity, and unrealized amounts remain local and are never staged by the publisher.
+"""
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
 

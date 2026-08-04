@@ -115,14 +115,14 @@ def _snapshot_row(snapshot: Any) -> dict[str, Any] | None:
     if asset is None:
         return None
     updated = datetime.fromtimestamp(int(snapshot.get("updateTime", 0)) / 1_000, UTC)
-    return _equity_row(updated.date().isoformat(), asset, "binance_daily_snapshot")
+    return _equity_row(updated, asset, "binance_daily_snapshot")
 
 
 def _current_account_row(account: dict[str, Any], end: datetime) -> dict[str, Any]:
     asset = _find_asset(account.get("assets"))
     if asset is None:
         raise BinanceClientError("Current Futures account contains no USDC asset row.")
-    return _equity_row(end.date().isoformat(), asset, "current_account")
+    return _equity_row(end, asset, "current_account")
 
 
 def _find_asset(assets: Any) -> dict[str, Any] | None:
@@ -134,7 +134,7 @@ def _find_asset(assets: Any) -> dict[str, Any] | None:
     )
 
 
-def _equity_row(date: str, asset: dict[str, Any], source: str) -> dict[str, Any]:
+def _equity_row(timestamp: datetime, asset: dict[str, Any], source: str) -> dict[str, Any]:
     try:
         wallet = float(asset["walletBalance"])
         margin = float(asset["marginBalance"])
@@ -142,7 +142,8 @@ def _equity_row(date: str, asset: dict[str, Any], source: str) -> dict[str, Any]
         raise BinanceClientError("USDC account snapshot has invalid balance fields.") from exc
     unrealized = float(asset.get("unrealizedProfit", margin - wallet))
     return {
-        "date": date,
+        "date": timestamp.date().isoformat(),
+        "timestamp_utc": timestamp.isoformat().replace("+00:00", "Z"),
         "wallet_balance_usdc": wallet,
         "margin_balance_usdc": margin,
         "unrealized_pnl_usdc": unrealized,

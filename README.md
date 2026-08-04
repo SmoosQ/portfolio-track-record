@@ -65,7 +65,7 @@ Only income rows whose asset is exactly `USDC` are included. Every observation i
 
 The public CSV contains daily returns, normalized equity, drawdown, daily realized PnL, commission, funding, net PnL, and trade count. It never contains the account balance, API metadata, UID, email, wallet address, or transaction hash.
 
-Private detailed outputs are written to `local_reports/`, and the underlying official USDC equity snapshots are retained in `data/private/`. Both directories are ignored by Git. They contain the total equity curve, realized and unrealized PnL, and daily/monthly returns including unrealized PnL.
+Private detailed outputs are written to `local_reports/`, and the underlying official USDC equity snapshots, account-trade cache, and one-minute mark-price cache are retained in `data/private/`. Both directories are ignored by Git. The local report includes a minute-level total equity curve, minute-level realized/unrealized/combined PnL, and daily/monthly returns including unrealized PnL. Minute unrealized PnL is reconstructed from trades and mark prices and calibrated to official account snapshots.
 
 ## Local environment and updates
 
