@@ -1,6 +1,6 @@
 # Performance Summary
 
-Generated at: **2026-08-04T06:42:15Z**<br>
+Generated at: **2026-08-04T06:44:18Z**<br>
 Coverage: **2026-07-01 to 2026-08-04 (UTC)**<br>
 Scope: **Daily USDC USD-M Futures realized performance**
 
@@ -13,8 +13,8 @@ Sharpe and Sortino use private total daily returns including unrealized PnL; unr
 | Latest Daily Return | 0.03% |
 | Annualized Return | 35.32% |
 | Annualized Volatility | 1.39% |
-| Sharpe Ratio | 5.252715 |
-| Sortino Ratio | 9.336509 |
+| Sharpe Ratio | 5.249712 |
+| Sortino Ratio | 9.331443 |
 | Maximum Drawdown | -0.01% |
 | Calmar Ratio | 3867.335549 |
 | Win Rate | 96.30% |
