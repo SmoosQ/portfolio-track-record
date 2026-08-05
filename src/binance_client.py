@@ -120,10 +120,10 @@ class BinanceReadOnlyClient:
     def _public_get(self, path: str, params: Mapping[str, Any]) -> Any:
         for attempt in range(self._max_retries + 1):
             try:
-                response = self._session.get(
+                response = self._get_retrying_timeouts(
                     f"{self.BASE_URL}{path}",
+                    path=path,
                     params=dict(params),
-                    timeout=(self._timeout.connect, self._timeout.read),
                 )
             except requests.RequestException as exc:
                 if attempt >= self._max_retries:
@@ -151,9 +151,9 @@ class BinanceReadOnlyClient:
     def _sync_server_time(self) -> None:
         started = int(time.time() * 1_000)
         try:
-            response = self._session.get(
+            response = self._get_retrying_timeouts(
                 f"{self.BASE_URL}/fapi/v1/time",
-                timeout=(self._timeout.connect, self._timeout.read),
+                path="/fapi/v1/time",
             )
             if response.status_code == 451:
                 raise BinanceResponseError(
@@ -192,9 +192,7 @@ class BinanceReadOnlyClient:
             url = f"{base_url or self.BASE_URL}{path}?{query}&signature={signature}"
 
             try:
-                response = self._session.get(
-                    url, timeout=(self._timeout.connect, self._timeout.read)
-                )
+                response = self._get_retrying_timeouts(url, path=path)
             except requests.RequestException as exc:
                 if attempt >= self._max_retries:
                     raise BinanceResponseError(
@@ -237,6 +235,35 @@ class BinanceReadOnlyClient:
             return payload
 
         raise BinanceResponseError(f"Unexpected retry exhaustion for endpoint {path}.")
+
+    def _get_retrying_timeouts(
+        self,
+        url: str,
+        *,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> requests.Response:
+        """Perform a GET, retrying connection and read timeouts until one completes."""
+
+        timeout_attempt = 0
+        while True:
+            try:
+                return self._session.get(
+                    url,
+                    params=dict(params) if params is not None else None,
+                    timeout=(self._timeout.connect, self._timeout.read),
+                )
+            except requests.Timeout:
+                delay = min(2**timeout_attempt, 16)
+                timeout_attempt += 1
+                LOGGER.warning(
+                    "Binance endpoint %s timed out; retrying in %s seconds "
+                    "(timeout attempt %s).",
+                    path,
+                    delay,
+                    timeout_attempt,
+                )
+                time.sleep(delay)
 
     @staticmethod
     def _safe_json(response: requests.Response, path: str) -> Any:

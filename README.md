@@ -103,6 +103,10 @@ This machine has a local schedule for **08:10 Asia/Shanghai**. A temporary enabl
 
 There is no continuously running daemon. The log file, enable flag, and process-lock file are local-only. The non-blocking lock prevents overlapping updates. See [Local Operations](docs/OPERATIONS.md) for the short start, status, stop, and log commands.
 
+Binance connection and read timeouts are retried indefinitely with exponential
+backoff capped at 16 seconds. Authentication failures and other non-timeout API
+errors still stop the update immediately so configuration problems remain visible.
+
 ## Daily metric definitions
 
 Crypto markets trade continuously, so annualization uses `365` days.
