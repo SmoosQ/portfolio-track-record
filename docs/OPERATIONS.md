@@ -2,6 +2,9 @@
 
 The updater is scheduled daily at **08:10 Asia/Shanghai**, but it is disabled after every machine reboot. There is no continuously running background process.
 
+Scheduled runs use `/usr/bin/proxychains4` with `config/proxychains.conf`. The
+local Mihomo SOCKS5 listener must be available on `127.0.0.1:7891`.
+
 Run these commands from `/data/disk1/portfolio-track-record`:
 
 ```bash

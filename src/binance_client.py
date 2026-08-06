@@ -120,7 +120,7 @@ class BinanceReadOnlyClient:
     def _public_get(self, path: str, params: Mapping[str, Any]) -> Any:
         for attempt in range(self._max_retries + 1):
             try:
-                response = self._get_retrying_timeouts(
+                response = self._get_retrying_transient_failures(
                     f"{self.BASE_URL}{path}",
                     path=path,
                     params=dict(params),
@@ -151,7 +151,7 @@ class BinanceReadOnlyClient:
     def _sync_server_time(self) -> None:
         started = int(time.time() * 1_000)
         try:
-            response = self._get_retrying_timeouts(
+            response = self._get_retrying_transient_failures(
                 f"{self.BASE_URL}/fapi/v1/time",
                 path="/fapi/v1/time",
             )
@@ -192,7 +192,7 @@ class BinanceReadOnlyClient:
             url = f"{base_url or self.BASE_URL}{path}?{query}&signature={signature}"
 
             try:
-                response = self._get_retrying_timeouts(url, path=path)
+                response = self._get_retrying_transient_failures(url, path=path)
             except requests.RequestException as exc:
                 if attempt >= self._max_retries:
                     raise BinanceResponseError(
@@ -236,16 +236,16 @@ class BinanceReadOnlyClient:
 
         raise BinanceResponseError(f"Unexpected retry exhaustion for endpoint {path}.")
 
-    def _get_retrying_timeouts(
+    def _get_retrying_transient_failures(
         self,
         url: str,
         *,
         path: str,
         params: Mapping[str, Any] | None = None,
     ) -> requests.Response:
-        """Perform a GET, retrying connection and read timeouts until one completes."""
+        """Perform a GET, retrying recoverable transport failures until one completes."""
 
-        timeout_attempt = 0
+        network_attempt = 0
         while True:
             try:
                 return self._session.get(
@@ -253,15 +253,21 @@ class BinanceReadOnlyClient:
                     params=dict(params) if params is not None else None,
                     timeout=(self._timeout.connect, self._timeout.read),
                 )
-            except requests.Timeout:
-                delay = min(2**timeout_attempt, 16)
-                timeout_attempt += 1
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                # Certificate validation failures require operator intervention and
+                # must not become an infinite retry loop. Connection resets, refused
+                # connections, and temporary DNS failures are safe to retry.
+                if isinstance(exc, requests.exceptions.SSLError):
+                    raise
+                delay = min(2**network_attempt, 16)
+                network_attempt += 1
                 LOGGER.warning(
-                    "Binance endpoint %s timed out; retrying in %s seconds "
-                    "(timeout attempt %s).",
+                    "Binance endpoint %s had a transient %s; retrying in %s seconds "
+                    "(network attempt %s).",
                     path,
+                    type(exc).__name__,
                     delay,
-                    timeout_attempt,
+                    network_attempt,
                 )
                 time.sleep(delay)
 
