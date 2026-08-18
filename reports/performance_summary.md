@@ -1,7 +1,7 @@
 # Performance Summary
 
-Generated at: **2026-08-17T00:10:08Z**<br>
-Coverage: **2026-07-01 to 2026-08-17 (UTC)**<br>
+Generated at: **2026-08-18T00:10:07Z**<br>
+Coverage: **2026-07-01 to 2026-08-18 (UTC)**<br>
 Scope: **Daily USDC USD-M Futures realized performance**
 
 Absolute account values are not published. USD-M Futures transfers are excluded from trading return.
@@ -9,23 +9,23 @@ Sharpe and Sortino use private total daily returns including unrealized PnL; unr
 
 | Metric | Value |
 |---|---:|
-| Cumulative Return | 3.83% |
-| Latest Daily Return | -0.00% |
-| Annualized Return | 35.69% |
+| Cumulative Return | 3.98% |
+| Latest Daily Return | 0.00% |
+| Annualized Return | 36.31% |
 | Annualized Volatility | 1.28% |
-| Sharpe Ratio | 6.135068 |
-| Sortino Ratio | 11.040983 |
+| Sharpe Ratio | 6.347997 |
+| Sortino Ratio | 11.420464 |
 | Maximum Drawdown | -0.01% |
-| Calmar Ratio | 3907.245035 |
-| Win Rate | 95.00% |
-| Profit Factor | 1291.367558 |
-| Total Realized Pnl Usdc | 168.959199 |
+| Calmar Ratio | 3975.176428 |
+| Win Rate | 97.50% |
+| Profit Factor | 1617.936180 |
+| Total Realized Pnl Usdc | 175.463299 |
 | Total Commission Usdc | -0.075227 |
-| Total Funding Fee Usdc | 1.660735 |
-| Total Net Pnl Usdc | 170.544706 |
+| Total Funding Fee Usdc | 1.751071 |
+| Total Net Pnl Usdc | 177.139142 |
 | Number Of Trading Days | 40 |
-| Number Of Trades | 1198 |
-| Valid Return Days | 45 |
+| Number Of Trades | 1243 |
+| Valid Return Days | 46 |
 | Excluded Return Days | 3 |
 | Annualization Factor | 365 |
 
